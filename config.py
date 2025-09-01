@@ -1,22 +1,19 @@
 import os
 from dotenv import load_dotenv
+from gateway.config_loader import load_config
 
 load_dotenv()
 
 class Config:
-    DEBUG = os.getenv("DEBUG", "false").lower() == "true"
-    SQLALCHEMY_DATABASE_URI = os.getenv("DATABASE_URL", "postgresql://user:pass@localhost:5432/gateway")
-    SQLALCHEMY_TRACK_MODIFICATIONS = False
+    def __init__(self):
+        cfg = load_config()
 
-    SERVICE_MAP = {
-        "/service1": os.getenv("SERVICE1_URL", "http://localhost:5001"),
-        "/service2": os.getenv("SERVICE2_URL", "http://localhost:5002"),
-    }
+        self.SERVICE_MAP = {f"/{name}": svc["url"] for name, svc in cfg["services"].items()}
+        self.RATE_LIMITS = {f"/{name}": svc.get("rate_limit", 100) for name, svc in cfg["services"].items()}
+        self.RATE_PERIOD = cfg["settings"].get("rate_period", 60)
 
-    MASTER_KEY = os.getenv("MASTER_KEY", "supersecret")
-
-    #rate limiting
-    REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-    RATE_LIMIT = int(os.getenv("RATE_LIMIT", "100"))  
-    RATE_PERIOD = int(os.getenv("RATE_PERIOD", "60")) 
-
+        self.DEBUG = os.getenv("DEBUG", "false").lower() == "true"
+        self.SQLALCHEMY_DATABASE_URI = os.getenv("DATABASE_URL", "postgresql://user:pass@localhost:5432/gateway")
+        self.SQLALCHEMY_TRACK_MODIFICATIONS = False
+        self.MASTER_KEY = os.getenv("MASTER_KEY", "supersecret")
+        self.REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")

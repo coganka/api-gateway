@@ -1,0 +1,10 @@
+services:
+  service1:
+    url: "http://localhost:5001"
+    rate_limit: 100   
+  service2:
+    url: "http://localhost:5002"
+    rate_limit: 50
+
+settings:
+  rate_period: 60    
