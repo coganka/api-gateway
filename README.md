@@ -1,112 +1,91 @@
 # API Gateway
 
-A lightweight **API Gateway** built with Flask, Postgres, and Redis — inspired by Kong/Envoy but implemented from scratch to showcase production-grade backend concepts.  
+A small API gateway in Python that puts routing, API-key authentication, rate limiting, and upstream failure handling in one place. Two sample services make the request path easy to follow locally.
 
-This gateway acts as a **traffic cop** for microservices:
-- Routes requests to backend services
-- Authenticates clients via API keys
-- Applies per-client rate limits
-- Handles backend failures with retries and a circuit breaker
-- Logs requests with correlation IDs
-- Exposes a `/metrics` endpoint for observability (Prometheus-ready)
-- Configuration driven via `gateway_config.yaml`
+**Python · Flask · PostgreSQL · Redis · Prometheus**
 
----
+## Request flow
 
-## ✨ Features
-- **Reverse Proxy** – dynamic routing to multiple backend services  
-- **API Key Authentication** – keys stored in Postgres, generated via admin API  
-- **Rate Limiting** – Redis-based counters, per-service quotas  
-- **Resilience** – retries with exponential backoff, circuit breaker for failing backends  
-- **Logging** – structured logs with request IDs and latency  
-- **Observability** – Prometheus metrics (requests, errors, latency)  
-- **Config-driven** – add/remove services via `gateway_config.yaml`  
+```text
+Client → API key check → Redis rate limit → Proxy → Upstream service
+             │                                │
+         PostgreSQL                      Retry / circuit breaker
+                                              │
+                                  Request logs + Prometheus metrics
+```
 
----
+PostgreSQL stores API keys and their validity. Redis counts requests per key and service. The proxy forwards requests to the upstreams in `gateway_config.yaml`, while middleware records response status, duration, and a request ID.
 
-## 🛠 Tech Stack
-- [Flask](https://flask.palletsprojects.com/) – HTTP server & middleware  
-- [Postgres](https://www.postgresql.org/) – persistent API key storage  
-- [Redis](https://redis.io/) – rate limiting & caching  
-- [Prometheus](https://prometheus.io/) – metrics collection  
-- [Docker Compose](https://docs.docker.com/compose/) (optional, future) – run full stack easily  
+## Implementation highlights
 
----
+- **Shared request policy:** authentication and rate limiting run before service handlers.
+- **Fixed-window quotas:** separate limits for the two sample services, configured over a 60-second window.
+- **Failure handling:** up to three attempts for request exceptions, exponential backoff, and a per-service circuit breaker with a cooldown.
+- **Observability:** an `X-Request-ID` response header, request logs, a request counter, and a latency histogram at `/metrics`.
+- **Small modules:** routing, persistence, rate limiting, metrics, and proxy behavior can be read independently.
 
-## 🚀 Getting Started
+## Run locally
 
-### 1. Clone repo & install deps
+Use Python 3.10+ with a local PostgreSQL database and Redis instance. The example below assumes a database named `gateway` and a database user that can create tables in it.
+
 ```bash
 git clone https://github.com/coganka/api-gateway.git
 cd api-gateway
-python -m venv venv && source venv/bin/activate
-pip install -r requirements.txt
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
 ```
 
-### 2. Setup environment
-Create `.env`:
-```env
-DEBUG=true
+Create `.env` in the repository root, replacing the example database credentials and master key:
 
-DATABASE_URL=postgresql://gateway_user:gateway_pass@localhost:5432/gateway
-MASTER_KEY=supersecret
-
+```dotenv
+DEBUG=false
+DATABASE_URL=postgresql://gateway_user:local_password@localhost:5432/gateway
 REDIS_URL=redis://localhost:6379/0
+MASTER_KEY=replace-with-a-local-development-secret
 ```
 
-### 3. Create `gateway_config.yaml`
-```yaml
-services:
-  service1:
-    url: "http://localhost:5001"
-    rate_limit: 100
-  service2:
-    url: "http://localhost:5002"
-    rate_limit: 50
+The app creates its tables at startup. Run each process in a separate terminal, from the repository root with the virtual environment activated:
 
-settings:
-  rate_period: 60
-```
-
-### 4. Run services and gateway
 ```bash
-python services/service1.py
-python services/service2.py
-python app.py
+python services/service1.py  # port 5001
+python services/service2.py  # port 5002
+python app.py               # gateway on port 8000
 ```
 
----
+Create an API key using the same master key as your `.env`:
 
-## 🔑 Usage
-
-### Generate API Key
 ```bash
 curl -X POST http://localhost:8000/admin/generate_key \
-  -H "X-Master-Key: supersecret" \
-  -H "Content-Type: application/json" \
-  -d '{"owner":"test-client"}'
+  -H 'X-Master-Key: replace-with-a-local-development-secret' \
+  -H 'Content-Type: application/json' \
+  -d '{"owner":"local-demo"}'
 ```
 
-### Call Service Through Gateway
-```bash
-curl http://localhost:8000/service1/test -H "X-API-Key: <your_api_key>"
-```
+Copy the returned `api_key` into the request:
 
-### Metrics
 ```bash
+curl http://localhost:8000/service1/test -H 'X-API-Key: YOUR_RETURNED_KEY'
+curl http://localhost:8000/healthz
 curl http://localhost:8000/metrics
 ```
 
----
+The proxied test returns `{"service":"service1","status":"ok"}`. Missing or invalid keys return `401`; an exhausted quota returns `429`.
 
-## 📊 Example Prometheus Metrics
+## Code map
 
-```
-# HELP gateway_requests_total Total requests through gateway
-# TYPE gateway_requests_total counter
-gateway_requests_total{service="service1",method="GET",status="200"} 5.0
+| File | Responsibility |
+|---|---|
+| [gateway/routes.py](gateway/routes.py) | Admin endpoints and dynamic proxy routes |
+| [gateway/middleware.py](gateway/middleware.py) | Authentication, service lookup, request logging, metrics |
+| [gateway/proxy.py](gateway/proxy.py) | Upstream HTTP calls and retries |
+| [gateway/rate_limit.py](gateway/rate_limit.py) | Redis counters and expiry |
+| [gateway/circuit_breaker.py](gateway/circuit_breaker.py) | Failure counts and cooldown state |
 
-# HELP gateway_request_latency_seconds Request latency through gateway
-# TYPE gateway_request_latency_seconds histogram
-gateway_request_latency_seconds_bucket{service="service1",le="0.005"} 1.0
-```
+## Design boundaries
+
+This is a compact implementation of gateway mechanics. The current service detection in middleware recognizes `service1` and `service2`; adding an upstream to YAML also requires updating that detection for quotas and metric labels.
+
+Circuit-breaker state is local to each Python process. It counts exhausted request exceptions, not upstream HTTP 5xx responses. The proxy does not currently preserve query strings, and retries apply to all supported methods; safe retries for requests with side effects need an explicit idempotency policy. API keys are stored in plaintext, and the admin endpoint uses a shared master key.
+
+Useful next steps are integration tests for these failure paths, hashed key storage, and a complete local container setup. No throughput or production availability guarantees are claimed.
